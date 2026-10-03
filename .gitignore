@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+
+# AWS
+.aws/
+*.pem
+
+# VS Code
+.vscode/
+
+# Large raw datasets
+data/*.csv
+
+# OS
+.DS_Store
+Thumbs.db
