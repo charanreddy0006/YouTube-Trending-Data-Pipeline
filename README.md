@@ -76,48 +76,19 @@ This project addresses those challenges by creating a repeatable workflow to:
 
 ## 4. Architecture
 
-The diagram below shows the logical architecture of the deployed pipeline. The two processing branches run in parallel as configured in Step Functions.
+## 4. Architecture
 
-```mermaid
-flowchart TB
-    API["YouTube Data API v3"]
-    ING["AWS Lambda<br/>YouTube Ingestion"]
-    BRONZE[("Amazon S3<br/>BRONZE: Raw JSON")]
-    SFN["AWS Step Functions<br/>Pipeline Orchestrator"]
+The following diagram illustrates the end-to-end architecture of the
+YouTube Trending Data Pipeline, including data ingestion, AWS processing,
+data quality validation, analytics, and workflow orchestration.
 
-    subgraph PAR["Parallel Processing"]
-        REF["AWS Lambda<br/>Reference Data → Parquet"]
-        B2S["AWS Glue / PySpark<br/>Bronze → Silver"]
-    end
-
-    SILVERREF[("Amazon S3<br/>Silver Reference Data")]
-    SILVERSTAT[("Amazon S3<br/>Silver Statistics")]
-    CATALOG[("AWS Glue Data Catalog")]
-    DQ["AWS Lambda<br/>Data Quality Checks"]
-    CHOICE{"Quality passed?"}
-    S2G["AWS Glue / PySpark<br/>Silver → Gold"]
-    GOLD[("Amazon S3<br/>GOLD: Curated Data")]
-    ATHENA["Amazon Athena<br/>SQL Analytics"]
-    SNSOK["Amazon SNS<br/>Success Notification"]
-    SNSFAIL["Amazon SNS<br/>Quality / Failure Alert"]
-
-    API --> ING
-    ING --> BRONZE
-    BRONZE --> SFN
-    SFN --> REF
-    SFN --> B2S
-    REF --> SILVERREF
-    B2S --> SILVERSTAT
-    SILVERREF --> CATALOG
-    SILVERSTAT --> CATALOG
-    CATALOG --> DQ
-    DQ --> CHOICE
-    CHOICE -- Yes --> S2G
-    S2G --> GOLD
-    GOLD --> ATHENA
-    S2G --> SNSOK
-    CHOICE -- No --> SNSFAIL
-```
+<p align="center">
+  <img
+    src="assets/architecture.png"
+    alt="YouTube Trending Data Pipeline Architecture"
+    width="100%"
+  />
+</p>
 
 ### Orchestration behavior
 
