@@ -1,0 +1,260 @@
+{
+  "Comment": "YouTube Trending Data Pipeline - Full orchestration using AWS Step Functions",
+  "TimeoutSeconds": 14400,
+  "StartAt": "IngestFromYouTubeAPI",
+  "States": {
+    "IngestFromYouTubeAPI": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "arn:aws:lambda:ap-south-1:069129260793:function:yt-data-pipeline-youtube-ingestion",
+        "Payload": {
+          "triggered_by": "step_functions",
+          "execution_id.$": "$$.Execution.Id"
+        }
+      },
+      "ResultPath": "$.ingestion_result",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException",
+            "Lambda.TooManyRequestsException"
+          ],
+          "IntervalSeconds": 30,
+          "MaxAttempts": 3,
+          "BackoffRate": 2
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "ResultPath": "$.error",
+          "Next": "NotifyIngestionFailure"
+        }
+      ],
+      "Next": "WaitForS3Consistency"
+    },
+
+    "WaitForS3Consistency": {
+      "Type": "Wait",
+      "Seconds": 10,
+      "Comment": "Wait briefly after ingestion",
+      "Next": "TransformReferenceData"
+    },
+
+    "TransformReferenceData": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "arn:aws:lambda:ap-south-1:069129260793:function:data-pipeline-json-to-parquet",
+        "Payload": {
+          "triggered_by": "step_functions"
+        }
+      },
+      "ResultPath": "$.reference_result",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException",
+            "Lambda.TooManyRequestsException"
+          ],
+          "IntervalSeconds": 15,
+          "MaxAttempts": 2,
+          "BackoffRate": 2
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "ResultPath": "$.error",
+          "Next": "NotifyTransformFailure"
+        }
+      ],
+      "Next": "RunBronzeToSilverGlueJob"
+    },
+
+    "RunBronzeToSilverGlueJob": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::glue:startJobRun.sync",
+      "Parameters": {
+        "JobName": "yt-data-pipeline-bronze-to-silver",
+        "Arguments": {
+          "--bronze_database": "yt-pipeline-bronze",
+          "--bronze_table": "raw_statistics",
+          "--silver_bucket": "data-pipeline-silver-youtube",
+          "--silver_database": "yt-pipeline-silver",
+          "--silver_table": "clean_statistics"
+        }
+      },
+      "ResultPath": "$.glue_bronze_silver_result",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "States.TaskFailed"
+          ],
+          "IntervalSeconds": 60,
+          "MaxAttempts": 2,
+          "BackoffRate": 2
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "ResultPath": "$.error",
+          "Next": "NotifyTransformFailure"
+        }
+      ],
+      "Next": "RunDataQualityChecks"
+    },
+
+    "RunDataQualityChecks": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "arn:aws:lambda:ap-south-1:069129260793:function:yt-data-pipeline-data-quality",
+        "Payload": {
+          "layer": "silver",
+          "database": "yt-pipeline-silver",
+          "tables": [
+            "clean_statistics"
+          ]
+        }
+      },
+      "ResultPath": "$.dq_result",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException",
+            "Lambda.TooManyRequestsException"
+          ],
+          "IntervalSeconds": 15,
+          "MaxAttempts": 2,
+          "BackoffRate": 2
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "ResultPath": "$.error",
+          "Next": "NotifyDQFailure"
+        }
+      ],
+      "Next": "EvaluateDataQuality"
+    },
+
+    "EvaluateDataQuality": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.dq_result.Payload.quality_passed",
+          "BooleanEquals": true,
+          "Next": "RunSilverToGoldGlueJob"
+        }
+      ],
+      "Default": "NotifyDQFailure"
+    },
+
+    "RunSilverToGoldGlueJob": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::glue:startJobRun.sync",
+      "Parameters": {
+        "JobName": "yt-data-pipeline-silver-to-gold",
+        "Arguments": {
+          "--silver_database": "yt-pipeline-silver",
+          "--gold_bucket": "data-pipeline-gold-youtube",
+          "--gold_database": "yt-pipeline-gold"
+        }
+      },
+      "ResultPath": "$.glue_gold_result",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "States.TaskFailed"
+          ],
+          "IntervalSeconds": 60,
+          "MaxAttempts": 2,
+          "BackoffRate": 2
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "ResultPath": "$.error",
+          "Next": "NotifyGoldFailure"
+        }
+      ],
+      "Next": "NotifySuccess"
+    },
+
+    "NotifySuccess": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::sns:publish",
+      "Parameters": {
+        "TopicArn": "arn:aws:sns:ap-south-1:069129260793:yt-data-pipeline-alerts",
+        "Subject": "[YT Pipeline] Pipeline completed successfully",
+        "Message.$": "States.Format('Pipeline execution {} completed successfully. Bronze, Silver, and Gold processing finished.', $$.Execution.Id)"
+      },
+      "End": true
+    },
+
+    "NotifyIngestionFailure": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::sns:publish",
+      "Parameters": {
+        "TopicArn": "arn:aws:sns:ap-south-1:069129260793:yt-data-pipeline-alerts",
+        "Subject": "[YT Pipeline] FAILURE - Ingestion step failed",
+        "Message.$": "States.Format('YouTube ingestion failed. Execution ID: {}. Error details: {}', $$.Execution.Id, States.JsonToString($.error))"
+      },
+      "End": true
+    },
+
+    "NotifyTransformFailure": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::sns:publish",
+      "Parameters": {
+        "TopicArn": "arn:aws:sns:ap-south-1:069129260793:yt-data-pipeline-alerts",
+        "Subject": "[YT Pipeline] FAILURE - Transformation failed",
+        "Message.$": "States.Format('A transformation step failed. Execution ID: {}. Error details: {}', $$.Execution.Id, States.JsonToString($.error))"
+      },
+      "End": true
+    },
+
+    "NotifyDQFailure": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::sns:publish",
+      "Parameters": {
+        "TopicArn": "arn:aws:sns:ap-south-1:069129260793:yt-data-pipeline-alerts",
+        "Subject": "[YT Pipeline] WARNING - Data quality checks failed",
+        "Message.$": "States.Format('Data quality checks failed or could not be completed. Execution ID: {}. Details: {}', $$.Execution.Id, States.JsonToString($.dq_result))"
+      },
+      "End": true
+    },
+
+    "NotifyGoldFailure": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::sns:publish",
+      "Parameters": {
+        "TopicArn": "arn:aws:sns:ap-south-1:069129260793:yt-data-pipeline-alerts",
+        "Subject": "[YT Pipeline] FAILURE - Gold aggregation failed",
+        "Message.$": "States.Format('Silver-to-Gold processing failed. Execution ID: {}. Error details: {}', $$.Execution.Id, States.JsonToString($.error))"
+      },
+      "End": true
+    }
+  }
+}
